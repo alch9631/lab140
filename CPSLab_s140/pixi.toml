@@ -1,0 +1,63 @@
+[workspace]
+name = "cps_lab"
+description = "Development environment for ROS packages"
+channels = ["https://prefix.dev/conda-forge", "https://prefix.dev/robostack-jazzy"]
+platforms = ["linux-64", "osx-arm64"] #, "win-64", "osx-64", "linux-aarch64"
+
+[dependencies]
+python = "*"
+compilers = "*"
+cmake = ">=3.10"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+rosdep = "*"
+colcon-common-extensions = "*"
+ros-jazzy-desktop = "*"
+ros-jazzy-ros-gz-sim = "*"
+ros-jazzy-ros-gz-bridge = "*"
+ros-jazzy-ament-cmake = "*"
+ros-jazzy-ros-workspace = "*"
+ros-jazzy-rqt-image-view = "*"
+ros-jazzy-image-transport-plugins = "*"
+ros-jazzy-rviz2 = "*"
+ros-jazzy-tf2-tools = "*" 
+ros-jazzy-ros2bag = "*"
+ros-jazzy-rosbag2-storage-mcap = "*"
+ros-jazzy-rosbag2-storage-default-plugins ="*" 
+ros-jazzy-rosbag2-transport = "*"
+ros-jazzy-turtlesim = "*"
+ros-jazzy-plotjuggler-ros = "*"
+ros-jazzy-teleop-twist-keyboard = "*"
+
+# ros-jazzy-rmw-fastrtps-cpp = "*"
+
+[target.osx-arm64.dependencies]
+libatomic_ops = "*"
+
+[target.osx-arm64.activation]
+scripts = ["install/setup.bash"]
+env = { LDFLAGS = "-undefined dynamic_lookup -L$CONDA_PREFIX/lib", CXXFLAGS = "-I$CONDA_PREFIX/include", DISPLAY = ":0" }
+
+[target.linux-64.dependencies]
+libgl-devel = "*"
+
+#[target.linux-64.activation]
+#scripts = ["install/setup.bash"]
+#env = { LDFLAGS = "-L$CONDA_PREFIX/lib", CXXFLAGS = "-I$CONDA_PREFIX/include", DISPLAY = ":0" }
+
+[tasks]
+clean = "rm -rf build/ install/ log/"
+#ros2 = "bash scripts/ros2_run.sh"
+test = "colcon test"
+test-results = "colcon test-result --verbose"
+camview = { cmd = "bash -c 'source install/setup.bash && ros2 run rqt_image_view rqt_image_view'", env = { ROS_DOMAIN_ID = "42" } }
+topics = { cmd = "bash -c 'source install/setup.bash && ros2 topic list'", env = { ROS_DOMAIN_ID = "42" } }
+camrecord = {cmd = "bash -c 'source install/setup.bash && ros2 run bag record /image_raw/compressed /camera_node'"}
+juggler = "ros2 run plotjuggler plotjuggler"
+
+[target.osx-arm64.tasks]
+build = { cmd = "bash -c 'colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DPython_FIND_VIRTUALENV=ONLY -DPython3_FIND_VIRTUALENV=ONLY -DCMAKE_EXE_LINKER_FLAGS=\"-undefined dynamic_lookup -L${CONDA_PREFIX}/lib\" -DCMAKE_SHARED_LINKER_FLAGS=\"-undefined dynamic_lookup -L${CONDA_PREFIX}/lib\" -DCMAKE_INSTALL_RPATH=\"${CONDA_PREFIX}/lib\" -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON'" }
+
+[target.linux-64.tasks]
+build = { cmd = "bash -c 'colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON  -DPython_FIND_VIRTUALENV=ONLY -DPython3_FIND_VIRTUALENV=ONLY -DCMAKE_EXE_LINKER_FLAGS=\"-L${CONDA_PREFIX}/lib\" -DCMAKE_SHARED_LINKER_FLAGS=\"-L${CONDA_PREFIX}/lib\" -DCMAKE_INSTALL_RPATH=\"${CONDA_PREFIX}/lib\" -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON'" }
