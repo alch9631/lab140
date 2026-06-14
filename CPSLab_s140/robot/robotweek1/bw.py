@@ -13,6 +13,7 @@ class LineFollowerDebug(Node):
     def __init__(self):
         super().__init__('line_follower_debug')
 
+        # debug image topics (view with rqt_image_view if no display)
         self.mask_pub = self.create_publisher(
             CompressedImage,
             '/line_mask/compressed',
@@ -30,7 +31,8 @@ class LineFollowerDebug(Node):
         self.pan_pub = self.create_publisher(Int32, '/servo_s1', 10)
         self.tilt_pub = self.create_publisher(Int32, '/servo_s2', 10)
 
-        self.image_sub = self.create_subscribtion (
+        # camera comes in over the topic (published by compressed_camera_node)
+        self.image_sub = self.create_subscription(
             CompressedImage,
             '/image_raw/compressed',
             self.image_callback,
@@ -46,7 +48,8 @@ class LineFollowerDebug(Node):
 
         self.black_threshold = 70
 
-        self.timer = self.create_timer(0.1, self.callback)
+        # set False if running headless / over SSH without X forwarding
+        self.show_windows = True
 
         self.get_logger().info('Line follower debug started')
 
@@ -66,19 +69,21 @@ class LineFollowerDebug(Node):
             msg.data = buf.tobytes()
             pub.publish(msg)
 
-    def callback(self):
-        # fixed camera center
+    def image_callback(self, msg):
+        # keep camera centered / looking down
         self.pan_pub.publish(Int32(data=self.pan_angle))
         self.tilt_pub.publish(Int32(data=self.tilt_angle))
 
-        ret, frame = self.cap.read()
-        if not ret:
-            self.get_logger().warn('Camera frame not received')
+        # decode incoming compressed frame
+        buf = np.frombuffer(msg.data, np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            self.get_logger().warn('Could not decode camera frame')
             return
 
         h, w, _ = frame.shape
 
-        # use only bottom half: floor area
+        # use only bottom area: floor in front of robot
         roi = frame[int(h * 0.55):h, :]
 
         self.publish_image(self.roi_pub, roi)
@@ -97,6 +102,7 @@ class LineFollowerDebug(Node):
         M = cv2.moments(mask)
         cmd = Twist()
 
+        cx = None
         if M["m00"] > 1000:
             cx = int(M["m10"] / M["m00"])
             error = cx - (w // 2)
@@ -113,6 +119,31 @@ class LineFollowerDebug(Node):
 
         self.cmd_pub.publish(cmd)
 
+        # live debug windows
+        if self.show_windows:
+            self.draw_windows(roi, gray, mask, cx, w)
+
+    def draw_windows(self, roi, gray, mask, cx, w):
+        overlay = roi.copy()
+        # center reference line (where we want the line to be)
+        cv2.line(overlay, (w // 2, 0), (w // 2, overlay.shape[0]),
+                 (255, 0, 0), 1)
+        # detected line centroid
+        if cx is not None:
+            cv2.line(overlay, (cx, 0), (cx, overlay.shape[0]),
+                     (0, 0, 255), 2)
+            cv2.putText(overlay, f'cx={cx} err={cx - (w // 2)}',
+                        (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 1)
+        else:
+            cv2.putText(overlay, 'NO LINE', (5, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        cv2.imshow('1 ROI (color)', overlay)
+        cv2.imshow('2 Grayscale', gray)
+        cv2.imshow('3 Mask (B/W)', mask)
+        cv2.waitKey(1)
+
 
 def main():
     rclpy.init()
@@ -126,7 +157,7 @@ def main():
 
     finally:
         node.stop_robot()
-        node.cap.release()
+        cv2.destroyAllWindows()
         node.destroy_node()
 
         if rclpy.ok():
