@@ -149,17 +149,23 @@ class ParcoursDrive(Node):
         white = ((S <= 60) & (V >= self.white_v_min)).astype(np.uint8) * 255
         green = cv2.inRange(hsv, self.green_lo, self.green_hi)
 
-        # clean the road mask, keep only the largest blob (the road itself)
+        # clean the road mask
         kernel = np.ones((5, 5), np.uint8)
         road = cv2.morphologyEx(road, cv2.MORPH_OPEN, kernel)
         road = cv2.morphologyEx(road, cv2.MORPH_CLOSE, kernel)
-        cnts, _ = cv2.findContours(road, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+
+        # keep only the road blob ANCHORED to the bottom of the ROI (the road
+        # is always directly under the robot). This stops it from locking onto
+        # a detached grey patch in the background and suddenly going straight.
+        num, labels = cv2.connectedComponents(road)
         road_clean = np.zeros_like(road)
-        if cnts:
-            biggest = max(cnts, key=cv2.contourArea)
-            if cv2.contourArea(biggest) > 0.05 * rh * rw:
-                cv2.drawContours(road_clean, [biggest], -1, 255, -1)
+        if num > 1:
+            strip = labels[int(rh * 0.85):, :]       # bottom 15% of the ROI
+            fg = strip[strip > 0]
+            if fg.size > 0:
+                vals, counts = np.unique(fg, return_counts=True)
+                keep = int(vals[np.argmax(counts)])   # main blob under robot
+                road_clean[labels == keep] = 255
         road = road_clean
 
         # green presence on left vs right (to push off-track edge away)
