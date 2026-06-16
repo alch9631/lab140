@@ -38,8 +38,9 @@ class ParcoursDrive(Node):
         self.image_sub = self.create_subscription(
             CompressedImage, '/image_raw/compressed', self.image_callback, 10)
 
-        self.pan_angle = 0
-        self.tilt_angle = -130   # tilt down so road fills the lower frame
+        # camera angle (override per run, e.g. TILT=0 for straight-ahead view)
+        self.pan_angle = int(os.environ.get('PAN', 0))
+        self.tilt_angle = int(os.environ.get('TILT', -130))
 
         # --- driving params ---
         self.speed = 0.12
@@ -47,8 +48,10 @@ class ParcoursDrive(Node):
         self.max_turn = 1.0      # allow sharp turns
         self.k_green = 0.6       # extra push away from green side
 
-        # --- ROI: ignore the top (room/horizon) ---
-        self.roi_top_frac = 0.45    # use everything below 45% of the height
+        # --- ROI: ignore the top (room/horizon). Smaller = keep more of the
+        # image, needed when the camera looks straight ahead (road sits higher).
+        # Override per run with ROI_TOP=0.25 ... 0.5
+        self.roi_top_frac = float(os.environ.get('ROI_TOP', 0.35))
         # lookahead band inside the ROI (fraction of ROI height) used to steer;
         # higher (toward 0) = looks farther ahead = reacts to curves sooner
         self.look_top = 0.05
@@ -154,18 +157,24 @@ class ParcoursDrive(Node):
         road = cv2.morphologyEx(road, cv2.MORPH_OPEN, kernel)
         road = cv2.morphologyEx(road, cv2.MORPH_CLOSE, kernel)
 
-        # keep only the road blob ANCHORED to the bottom of the ROI (the road
-        # is always directly under the robot). This stops it from locking onto
-        # a detached grey patch in the background and suddenly going straight.
+        # pick ONE road blob. Prefer the one anchored at the bottom (road under
+        # the robot) so it can't jump to a detached grey patch in the
+        # background. If nothing reaches the bottom (camera looking straight
+        # ahead -> road sits higher in the frame), fall back to the largest
+        # blob so it still drives.
         num, labels = cv2.connectedComponents(road)
         road_clean = np.zeros_like(road)
         if num > 1:
-            strip = labels[int(rh * 0.85):, :]       # bottom 15% of the ROI
+            strip = labels[int(rh * 0.82):, :]       # bottom 18% of the ROI
             fg = strip[strip > 0]
-            if fg.size > 0:
+            if fg.size > 50:
                 vals, counts = np.unique(fg, return_counts=True)
                 keep = int(vals[np.argmax(counts)])   # main blob under robot
-                road_clean[labels == keep] = 255
+            else:
+                sizes = np.bincount(labels.ravel())
+                sizes[0] = 0                          # ignore background
+                keep = int(np.argmax(sizes))          # largest blob anywhere
+            road_clean[labels == keep] = 255
         road = road_clean
 
         # green presence on left vs right (to push off-track edge away)
@@ -175,23 +184,29 @@ class ParcoursDrive(Node):
         green_total = (green_l + green_r) / (rh * rw)
         green_bias = self.k_green * (green_r - green_l) / (rh * rw)
 
-        # LOOKAHEAD band: steer by where the road is FARTHER ahead, not the
-        # near region. The near road barely shifts on a curve, which is why it
-        # was understeering and going straight. The far band swings hard.
+        # CENTERLINE between the two white lines: for several scan rows across
+        # the lookahead band, take the midpoint between the left and right edge
+        # of the grey corridor (= midway between the white walls). Average them
+        # into one target. Nearer rows weigh a little more.
         la_top = int(rh * self.look_top)
         la_bot = int(rh * self.look_bot)
-        band = road[la_top:la_bot, :]
-        band_pixels = cv2.countNonZero(band)
         full_pixels = cv2.countNonZero(road)
+
+        centers = []
+        cweights = []
+        for y in np.linspace(la_top, la_bot - 1, 12).astype(int):
+            xs = np.where(road[y] > 0)[0]
+            if xs.size > 5:
+                centers.append(0.5 * (float(xs[0]) + float(xs[-1])))
+                cweights.append(0.5 + 0.5 * (y / max(rh - 1, 1)))
 
         cmd = Twist()
         cx = None
         state = ''
 
-        if band_pixels > 0.03 * (la_bot - la_top) * rw:
-            # road visible far ahead -> normal lookahead steering
-            M = cv2.moments(band)
-            cx = M['m10'] / M['m00']
+        if len(centers) >= 3:
+            # follow the corridor centerline
+            cx = float(np.average(centers, weights=np.array(cweights)))
             error = (cx - rw / 2.0) / (rw / 2.0)        # -1..1
             turn = -self.k_turn * error + green_bias
             turn = max(-self.max_turn, min(self.max_turn, turn))
@@ -200,8 +215,8 @@ class ParcoursDrive(Node):
             cmd.linear.x = max(0.04, speed)
             cmd.angular.z = turn
             self.last_turn = turn
-            state = (f'ROAD err={error:+.2f} turn={turn:+.2f} '
-                     f'v={cmd.linear.x:.2f} green={green_total:.2f}')
+            state = (f'CENTER err={error:+.2f} turn={turn:+.2f} '
+                     f'v={cmd.linear.x:.2f} rows={len(centers)}')
         elif full_pixels > 0.05 * rh * rw:
             # road only close (sharp curve leaving the far view) -> turn hard
             # toward whichever side the near road sits, crawl forward
