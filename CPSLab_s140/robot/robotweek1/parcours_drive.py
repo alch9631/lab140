@@ -28,6 +28,9 @@ class ParcoursDrive(Node):
             CompressedImage, '/parcours/overlay/compressed', 10)
         self.mask_pub = self.create_publisher(
             CompressedImage, '/parcours/mask/compressed', 10)
+        # binary white-line view (black/white) for debugging the wall detection
+        self.white_pub = self.create_publisher(
+            CompressedImage, '/parcours/white/compressed', 10)
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -47,6 +50,7 @@ class ParcoursDrive(Node):
         self.k_turn = 1.3        # steering gain on normalized road error (-1..1)
         self.max_turn = 1.0      # allow sharp turns
         self.k_green = 0.6       # extra push away from green side
+        self.k_wall = 0.35       # push away from the closer white line (wall)
 
         # --- ROI: ignore the top (room/horizon). Smaller = keep more of the
         # image, needed when the camera looks straight ahead (road sits higher).
@@ -208,7 +212,21 @@ class ParcoursDrive(Node):
             # follow the corridor centerline
             cx = float(np.average(centers, weights=np.array(cweights)))
             error = (cx - rw / 2.0) / (rw / 2.0)        # -1..1
-            turn = -self.k_turn * error + green_bias
+
+            # white lines = hard walls: in the near band, find the closest
+            # white line left and right of center; push away from the nearer.
+            wall = 0.0
+            nb = white[int(rh * 0.5):, :]
+            cols = np.where(nb.sum(axis=0) > 0)[0]
+            if cols.size:
+                left = cols[cols < rw / 2]
+                right = cols[cols > rw / 2]
+                if left.size and right.size:
+                    dist_l = rw / 2 - float(left.max())   # gap to left wall
+                    dist_r = float(right.min()) - rw / 2  # gap to right wall
+                    wall = -self.k_wall * (dist_r - dist_l) / (rw / 2)
+
+            turn = -self.k_turn * error + green_bias + wall
             turn = max(-self.max_turn, min(self.max_turn, turn))
             # slow down in sharp curves so it can physically make the turn
             speed = self.speed * (1.0 - 0.6 * min(1.0, abs(error)))
@@ -254,6 +272,7 @@ class ParcoursDrive(Node):
 
         self.publish_image(self.overlay_pub, overlay)
         self.publish_image(self.mask_pub, masks)
+        self.publish_image(self.white_pub, white)   # binary white-line view
 
         if self.show_windows:
             cv2.imshow('Parcours (overlay)', overlay)
