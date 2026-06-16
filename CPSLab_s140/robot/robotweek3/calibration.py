@@ -43,6 +43,8 @@ class HeadlessCalib(Node):
         self.accepted_stats = []          # (center, area) je akzeptierter Ansicht
         self.img_size = None
         self.done = False
+        # set False if running headless / over SSH without X forwarding
+        self.show_windows = True
         self.get_logger().info(
             f"Abonniere {IN_TOPIC}. Brett langsam vor der Kamera bewegen. "
             f"Ziel: {TARGET_VIEWS} Ansichten. Vorschau auf {OUT_TOPIC}.")
@@ -75,7 +77,11 @@ class HeadlessCalib(Node):
             return
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        found, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
+        # robust detection: handles uneven lighting + skips frames with no board
+        flags = (cv2.CALIB_CB_ADAPTIVE_THRESH
+                 + cv2.CALIB_CB_NORMALIZE_IMAGE
+                 + cv2.CALIB_CB_FAST_CHECK)
+        found, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, flags)
         view = frame.copy()
 
         if found:
@@ -90,9 +96,19 @@ class HeadlessCalib(Node):
                 self.get_logger().info(
                     f"Ansicht {len(self.objpoints)}/{TARGET_VIEWS} gesammelt")
 
+        # status banner: green = board seen this frame, red = not found
+        status = "BOARD FOUND" if found else "NO BOARD"
+        color = (0, 255, 0) if found else (0, 0, 255)
+        cv2.putText(view, status, (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.putText(view, f"{len(self.objpoints)}/{TARGET_VIEWS}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         self.publish_preview(view)
+
+        # live popup window (set show_windows=False for headless/SSH)
+        if self.show_windows:
+            cv2.imshow("Calibration", view)
+            cv2.waitKey(1)
 
         if len(self.objpoints) >= TARGET_VIEWS:
             self.done = True
@@ -138,6 +154,7 @@ def main():
         node.get_logger().info("Abbruch - kalibriere mit bisherigen Ansichten.")
         node.calibrate()
     finally:
+        cv2.destroyAllWindows()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
