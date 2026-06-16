@@ -43,12 +43,16 @@ class ParcoursDrive(Node):
 
         # --- driving params ---
         self.speed = 0.12
-        self.k_turn = 0.006      # steering gain on normalized road error (-1..1)
-        self.max_turn = 0.7
+        self.k_turn = 1.3        # steering gain on normalized road error (-1..1)
+        self.max_turn = 1.0      # allow sharp turns
         self.k_green = 0.6       # extra push away from green side
 
         # --- ROI: ignore the top (room/horizon) ---
         self.roi_top_frac = 0.45    # use everything below 45% of the height
+        # lookahead band inside the ROI (fraction of ROI height) used to steer;
+        # higher (toward 0) = looks farther ahead = reacts to curves sooner
+        self.look_top = 0.05
+        self.look_bot = 0.45
 
         # --- GREY ROAD in HSV: low saturation, mid brightness ---
         self.road_s_max = 55     # road is greyish -> low saturation
@@ -158,44 +162,56 @@ class ParcoursDrive(Node):
                 cv2.drawContours(road_clean, [biggest], -1, 255, -1)
         road = road_clean
 
-        # weight nearer rows (bottom of ROI) more heavily
-        weights = np.linspace(0.3, 1.0, rh).reshape(-1, 1)
-        wmask = (road.astype(np.float32) / 255.0) * weights
-        road_mass = float(wmask.sum())
-
         # green presence on left vs right (to push off-track edge away)
         half = rw // 2
         green_l = float(cv2.countNonZero(green[:, :half]))
         green_r = float(cv2.countNonZero(green[:, half:]))
         green_total = (green_l + green_r) / (rh * rw)
+        green_bias = self.k_green * (green_r - green_l) / (rh * rw)
+
+        # LOOKAHEAD band: steer by where the road is FARTHER ahead, not the
+        # near region. The near road barely shifts on a curve, which is why it
+        # was understeering and going straight. The far band swings hard.
+        la_top = int(rh * self.look_top)
+        la_bot = int(rh * self.look_bot)
+        band = road[la_top:la_bot, :]
+        band_pixels = cv2.countNonZero(band)
+        full_pixels = cv2.countNonZero(road)
 
         cmd = Twist()
         cx = None
         state = ''
 
-        if road_mass > 0.02 * rh * rw:
-            # centroid x of the (weighted) road region
-            xs = np.arange(rw, dtype=np.float32).reshape(1, -1)
-            cx = float((wmask * xs).sum() / road_mass)
-            error = (cx - rw / 2.0) / (rw / 2.0)     # normalize to -1..1
-
-            # bias away from the greener side (green right -> steer left, etc.)
-            green_bias = self.k_green * (green_r - green_l) / (rh * rw)
-
-            # P term: error is -1..1, k_turn*100 maps it into the turn range
-            turn = -self.k_turn * 100.0 * error
-            turn += green_bias
+        if band_pixels > 0.03 * (la_bot - la_top) * rw:
+            # road visible far ahead -> normal lookahead steering
+            M = cv2.moments(band)
+            cx = M['m10'] / M['m00']
+            error = (cx - rw / 2.0) / (rw / 2.0)        # -1..1
+            turn = -self.k_turn * error + green_bias
             turn = max(-self.max_turn, min(self.max_turn, turn))
-
-            cmd.linear.x = self.speed
+            # slow down in sharp curves so it can physically make the turn
+            speed = self.speed * (1.0 - 0.6 * min(1.0, abs(error)))
+            cmd.linear.x = max(0.04, speed)
             cmd.angular.z = turn
             self.last_turn = turn
-            state = (f'ROAD cx={cx:.0f} err={error:+.2f} '
-                     f'green={green_total:.2f} turn={turn:+.2f}')
+            state = (f'ROAD err={error:+.2f} turn={turn:+.2f} '
+                     f'v={cmd.linear.x:.2f} green={green_total:.2f}')
+        elif full_pixels > 0.05 * rh * rw:
+            # road only close (sharp curve leaving the far view) -> turn hard
+            # toward whichever side the near road sits, crawl forward
+            M = cv2.moments(road)
+            cx = M['m10'] / M['m00']
+            error = (cx - rw / 2.0) / (rw / 2.0)
+            turn = -self.k_turn * 1.5 * error + green_bias
+            turn = max(-self.max_turn, min(self.max_turn, turn))
+            cmd.linear.x = self.speed * 0.35
+            cmd.angular.z = turn
+            self.last_turn = turn
+            state = f'SHARP CURVE err={error:+.2f} turn={turn:+.2f}'
         else:
             # road lost -> creep and keep turning the last direction to recover
             cmd.linear.x = 0.0
-            cmd.angular.z = 0.4 if self.last_turn >= 0 else -0.4
+            cmd.angular.z = 0.6 if self.last_turn >= 0 else -0.6
             state = f'NO ROAD - recovering (green={green_total:.2f})'
 
         self.cmd_pub.publish(cmd)
