@@ -62,6 +62,27 @@ class ParcoursDrive(Node):
         self.green_lo = np.array([35, 50, 40], np.uint8)
         self.green_hi = np.array([95, 255, 255], np.uint8)
 
+        # --- camera calibration: undistort the fisheye before processing ---
+        self.K = None
+        self.dist = None
+        self.map1 = None
+        self.map2 = None
+        calib_path = os.environ.get('CALIB_FILE', 'camera_calibration.yaml')
+        if not os.path.isfile(calib_path):
+            here = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'camera_calibration.yaml')
+            if os.path.isfile(here):
+                calib_path = here
+        fs = cv2.FileStorage(calib_path, cv2.FILE_STORAGE_READ)
+        if fs.isOpened():
+            self.K = fs.getNode('camera_matrix').mat()
+            self.dist = fs.getNode('distortion_coefficients').mat()
+            fs.release()
+            self.get_logger().info(f'Loaded calibration from {calib_path}')
+        else:
+            self.get_logger().warn(
+                f'No calibration file ({calib_path}); running on raw frames')
+
         # last steering, used when the road is briefly lost
         self.last_turn = 0.0
 
@@ -86,6 +107,18 @@ class ParcoursDrive(Node):
             msg.data = buf.tobytes()
             pub.publish(msg)
 
+    def undistort(self, frame):
+        """Remove fisheye distortion using the loaded calibration."""
+        if self.K is None:
+            return frame
+        h, w = frame.shape[:2]
+        if self.map1 is None:
+            newK, _ = cv2.getOptimalNewCameraMatrix(
+                self.K, self.dist, (w, h), 0, (w, h))
+            self.map1, self.map2 = cv2.initUndistortRectifyMap(
+                self.K, self.dist, None, newK, (w, h), cv2.CV_16SC2)
+        return cv2.remap(frame, self.map1, self.map2, cv2.INTER_LINEAR)
+
     def image_callback(self, msg):
         self.pan_pub.publish(Int32(data=self.pan_angle))
         self.tilt_pub.publish(Int32(data=self.tilt_angle))
@@ -95,6 +128,8 @@ class ParcoursDrive(Node):
         if frame is None:
             self.get_logger().warn('Could not decode camera frame')
             return
+
+        frame = self.undistort(frame)
 
         h, w, _ = frame.shape
         roi = frame[int(h * self.roi_top_frac):h, :]   # drop the room/horizon
