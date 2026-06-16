@@ -52,6 +52,16 @@ class ParcoursDrive(Node):
         self.k_green = 0.6       # extra push away from green side
         self.k_wall = 0.35       # push away from the closer white line (wall)
 
+        # --- PID controller on the centerline error (-1..1) ---
+        self.kp = 1.3
+        self.ki = 0.4
+        self.kd = 0.5
+        self.i_clamp = 1.0       # integral anti-windup limit
+        self.wall_min_frac = 0.10  # if a wall is closer than this*width -> hard turn
+        self.prev_time = None
+        self.prev_error = 0.0
+        self.integral = 0.0
+
         # --- ROI: ignore the top (room/horizon). Smaller = keep more of the
         # image, needed when the camera looks straight ahead (road sits higher).
         # Override per run with ROI_TOP=0.25 ... 0.5
@@ -213,9 +223,22 @@ class ParcoursDrive(Node):
             cx = float(np.average(centers, weights=np.array(cweights)))
             error = (cx - rw / 2.0) / (rw / 2.0)        # -1..1
 
-            # white lines = hard walls: in the near band, find the closest
-            # white line left and right of center; push away from the nearer.
+            # --- PID on the centerline error ---
+            now = self.get_clock().now().nanoseconds * 1e-9
+            dt = (now - self.prev_time) if self.prev_time else 0.05
+            dt = max(1e-3, min(0.2, dt))
+            self.prev_time = now
+            self.integral += error * dt
+            self.integral = max(-self.i_clamp, min(self.i_clamp, self.integral))
+            deriv = (error - self.prev_error) / dt
+            self.prev_error = error
+            pid = self.kp * error + self.ki * self.integral + self.kd * deriv
+
+            # white lines = hard walls. Find nearest white line left/right of
+            # center in the near band; gentle push away, plus a HARD override
+            # turn if a wall gets too close (stops it driving over the line).
             wall = 0.0
+            hard = None
             nb = white[int(rh * 0.5):, :]
             cols = np.where(nb.sum(axis=0) > 0)[0]
             if cols.size:
@@ -225,15 +248,22 @@ class ParcoursDrive(Node):
                     dist_l = rw / 2 - float(left.max())   # gap to left wall
                     dist_r = float(right.min()) - rw / 2  # gap to right wall
                     wall = -self.k_wall * (dist_r - dist_l) / (rw / 2)
+                    wmin = self.wall_min_frac * rw
+                    if dist_l < wmin and dist_l <= dist_r:
+                        hard = -self.max_turn   # too close to left wall -> hard right
+                    elif dist_r < wmin and dist_r < dist_l:
+                        hard = self.max_turn    # too close to right wall -> hard left
 
-            turn = -self.k_turn * error + green_bias + wall
+            turn = -pid + green_bias + wall
+            if hard is not None:
+                turn = hard                     # wall emergency override
             turn = max(-self.max_turn, min(self.max_turn, turn))
             # slow down in sharp curves so it can physically make the turn
             speed = self.speed * (1.0 - 0.6 * min(1.0, abs(error)))
             cmd.linear.x = max(0.04, speed)
             cmd.angular.z = turn
             self.last_turn = turn
-            state = (f'CENTER err={error:+.2f} turn={turn:+.2f} '
+            state = (f'PID err={error:+.2f} turn={turn:+.2f} '
                      f'v={cmd.linear.x:.2f} rows={len(centers)}')
         elif full_pixels > 0.05 * rh * rw:
             # road only close (sharp curve leaving the far view) -> turn hard
@@ -252,6 +282,11 @@ class ParcoursDrive(Node):
             cmd.linear.x = 0.0
             cmd.angular.z = 0.6 if self.last_turn >= 0 else -0.6
             state = f'NO ROAD - recovering (green={green_total:.2f})'
+
+        # reset the integrator whenever we are not cleanly centerline-tracking
+        if not state.startswith('PID'):
+            self.integral = 0.0
+            self.prev_error = 0.0
 
         self.cmd_pub.publish(cmd)
         self.get_logger().info(state)
